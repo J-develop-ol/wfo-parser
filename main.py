@@ -39,10 +39,11 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="WFO Parser", version="1.1.0")
 
-# Step 2 – root route
-@app.get("/")
-def root():
+# Step 2 – root route (change path to /health so it doesn't override your main page)
+@app.get("/health")
+def health():
     return {"status": "ok"}
+
 
 app.add_middleware(
     CORSMiddleware,
