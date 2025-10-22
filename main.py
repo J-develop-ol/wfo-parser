@@ -17,6 +17,7 @@ HOW TO RUN LOCALLY
 from __future__ import annotations
 
 import io
+import logging
 from datetime import datetime
 from typing import Dict
 
@@ -33,7 +34,15 @@ CORS_ALLOWED_ORIGINS = [
 ]
 # ==========================================================
 
+# Step 3 – logging
+logging.basicConfig(level=logging.INFO)
+
 app = FastAPI(title="WFO Parser", version="1.1.0")
+
+# Step 2 – root route
+@app.get("/")
+def root():
+    return {"status": "ok"}
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,6 +51,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
 
 # ---------- Utility: your parsing logic ----------
 
