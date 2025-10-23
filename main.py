@@ -141,6 +141,7 @@ async def index() -> str:
     html, body {{
   height: 100%;
   margin: 0;
+  overflow: hidden;
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
   background: #f9fafb;
 }}
@@ -247,6 +248,7 @@ async def convert(file: UploadFile = File(...), download: str | None = Form(None
 html, body {{
   height: 100%;
   margin: 0;
+  overflow: hidden;
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
   background: #f9fafb;
 }}
