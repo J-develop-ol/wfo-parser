@@ -406,25 +406,29 @@ textarea {{
 
   </div>
 
-  <script>
-  function copyCode() {{
-    const code = document.getElementById('code');
-    const msg = document.getElementById('msg');
+ <script>
+async function copyCode() {{
+  const code = document.getElementById('code');
+  const msg = document.getElementById('msg');
+  const text = code.value;
 
-    if (!navigator.clipboard) {{
-      code.select();
-      document.execCommand('copy');
-    }} else {{
-      navigator.clipboard.writeText(code.value);
-    }}
-
+  try {{
+    // Modern Clipboard API
+    await navigator.clipboard.writeText(text);
     msg.textContent = '✓ Copied!';
-    msg.classList.add('show');
-    setTimeout(() => {{
-      msg.classList.remove('show');
-    }}, 2000);
+  }} catch (err) {{
+    // Fallback for older browsers
+    code.select();
+    document.execCommand('copy');
+    msg.textContent = '✓ Copied (fallback)';
   }}
-  </script>
+
+  msg.classList.add('show');
+  setTimeout(() => msg.classList.remove('show'), 2000);
+}}
+</script>
+
+
 
 </body></html>
 """
