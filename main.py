@@ -1,7 +1,7 @@
 """
 WFO Parser – FastAPI web app
 ---------------------------------
-This app lets users upload a MultiCharts WFO CSV and see the generated PowerLanguage
+This app lets users upload a MultiCharts WFO CSV OR paste the CSV text and see the generated PowerLanguage
 code directly on the page, with an option to also download the .txt file.
 
 HOW TO RUN LOCALLY
@@ -19,7 +19,7 @@ from __future__ import annotations
 import io
 import logging
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse
@@ -37,7 +37,7 @@ CORS_ALLOWED_ORIGINS = [
 # Step 3 – logging
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="WFO Parser", version="1.1.0")
+app = FastAPI(title="WFO Parser", version="1.2.0")
 
 # Step 2 – root route (change path to /health so it doesn't override your main page)
 @app.api_route("/health", methods=["GET", "HEAD"])
@@ -54,22 +54,56 @@ app.add_middleware(
 )
 
 
-
 # ---------- Utility: your parsing logic ----------
 
 def parse_wfo_csv(csv_bytes: bytes, encoding: str = "utf-8") -> str:
     import pandas as pd
-    from collections import defaultdict
     import io
+    from collections import defaultdict
 
-    f = io.StringIO(csv_bytes.decode(encoding, errors="replace"))
-    df = pd.read_csv(f)
+    text = csv_bytes.decode(encoding, errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+
+    if not lines:
+        raise HTTPException(status_code=400, detail="Input is empty.")
+
+    # Detect delimiter from header line
+    header = lines[0]
+    if "\t" in header:
+        delim = "\t"
+    elif ";" in header and "," not in header:
+        delim = ";"
+    else:
+        delim = ","
+
+    # Keep only the rectangular table portion (ignore footer like "Number of profitable runs")
+    expected_cols = header.count(delim) + 1
+    table_lines = [header]
+
+    for ln in lines[1:]:
+        # Only accept rows that match the header column count
+        if ln.count(delim) + 1 != expected_cols:
+            break
+        table_lines.append(ln)
+
+    table_text = "\n".join(table_lines)
+    df = pd.read_csv(io.StringIO(table_text), sep=delim)
     df.columns = df.columns.str.strip()
+
     if df.empty:
-        raise HTTPException(status_code=400, detail="CSV file is empty.")
+        raise HTTPException(status_code=400, detail="No data rows found in the pasted table.")
 
     start_col = "Begin Out-of-Sample Data Interval"
     end_col = "End Out-of-Sample Data Interval"
+
+    if start_col not in df.columns or end_col not in df.columns:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Could not find required date columns. "
+                "Make sure you copied the main WFO table including the Out-of-Sample interval columns."
+            ),
+        )
 
     def to_pl_date(date_str: str) -> str:
         date_only = str(date_str).split()[0]
@@ -79,18 +113,36 @@ def parse_wfo_csv(csv_bytes: bytes, encoding: str = "utf-8") -> str:
         return f"{prefix}{yy:02d}{int(month):02d}{int(day):02d}"
 
     excluded_starts = ("IS ", "OOS ")
-    excluded_exact = {start_col, end_col, "Begin In-Sample Data Interval", "End In-Sample Data Interval"}
+    excluded_exact = {
+        start_col,
+        end_col,
+        "Begin In-Sample Data Interval",
+        "End In-Sample Data Interval",
+        "Begin Out-of-Sample Data Interval",
+        "End Out-of-Sample Data Interval",
+    }
+
     candidates = [c for c in df.columns if c not in excluded_exact and not c.startswith(excluded_starts)]
 
-    from collections import defaultdict
     groups = defaultdict(list)
     for col in candidates:
-        if " " in col and pd.api.types.is_numeric_dtype(df[col]):
+        if " " not in col:
+            continue
+
+        # More robust than is_numeric_dtype: accept numeric-looking columns even if read as strings
+        series_num = pd.to_numeric(df[col], errors="coerce")
+        if series_num.notna().any():
             prefix = col.split(" ", 1)[0]
             groups[prefix].append(col)
 
     if not groups:
-        raise HTTPException(status_code=400, detail="Could not find numeric strategy columns with a prefix like 'Strategy Param'.")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Could not find input parameter columns. "
+                "Your paste must include the input columns (e.g. 'Smc0012 JnBarExit', 'Smc0012 JstopLoss')."
+            ),
+        )
 
     best_prefix, strategy_cols = max(groups.items(), key=lambda kv: len(kv[1]))
     clean_var_names = {col: col.split(" ", 1)[1].replace(" ", "_") for col in strategy_cols}
@@ -125,7 +177,6 @@ end;"""
     final_code = vars_block + "\n\n" + "\n\n".join(code_blocks)
     return final_code
 
-
 # ---------- Routes ----------
 
 @app.get("/", response_class=HTMLResponse)
@@ -139,75 +190,133 @@ async def index() -> str:
   <title>WFO Parser</title>
   <style>
     html, body {{
-  height: 100%;
-  margin: 0;
-  overflow: hidden;
-  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-  background: #f9fafb;
-}}
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: #f9fafb;
+    }}
 
-/* make the page a flex container: centered horizontally, top-aligned vertically */
-body {{
-  display: flex;
-  justify-content: center;   /* center left/right */
-  align-items: flex-start;   /* stick to the top */
-  padding-top: 10vh;         /* roughly top third */
-}}
+    /* make the page a flex container: centered horizontally, top-aligned vertically */
+    body {{
+      display: flex;
+      justify-content: center;   /* center left/right */
+      align-items: flex-start;   /* stick to the top */
+      padding-top: 10vh;         /* roughly top third */
+    }}
 
-.card {{
-  width: 100%;
-  max-width: 1000px;
-  background: white;
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-  padding: 2.5rem;
-  text-align: center;
-}}
+    .card {{
+      width: 100%;
+      max-width: 1000px;
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+      padding: 2.5rem;
+      text-align: center;
+    }}
 
-.input-row {{
-  display: flex;
-  justify-content: center;  /* centers horizontally */
-  margin: 1rem 0;
-}}
+    .mode-row {{
+      display: flex;
+      justify-content: center;
+      gap: 1.25rem;
+      margin: 1rem 0 0.25rem;
+      flex-wrap: wrap;
+    }}
 
-input[type=file] {{
-  display: block;
-  margin: 0 auto;            /* fallback centering */
-}}
+    .input-row {{
+      display: flex;
+      justify-content: center;  /* centers horizontally */
+      margin: 1rem 0;
+    }}
 
+    input[type=file] {{
+      display: block;
+      margin: 0 auto;            /* fallback centering */
+    }}
 
-    textarea {{ width: 100%; height: 300px; margin-top: 1rem; padding: 0.75rem; font-family: monospace; border-radius: 8px; border: 1px solid #d1d5db; background: #f9fafb; }}
-    button {{ background: black; color: white; border: none; padding: 0.75rem 1rem; border-radius: 8px; cursor: pointer; }}
+    textarea {{
+      width: 100%;
+      height: 300px;
+      margin-top: 1rem;
+      padding: 0.75rem;
+      font-family: monospace;
+      border-radius: 8px;
+      border: 1px solid #d1d5db;
+      background: #f9fafb;
+      box-sizing: border-box;
+      resize: vertical;
+      line-height: 1.4;
+    }}
+
+    button {{
+      background: black;
+      color: white;
+      border: none;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      cursor: pointer;
+    }}
+
     .hint {{ color: #6b7280; font-size: 0.9rem; }}
-    input[type=file] {{ display: block; margin: 1rem 0; }}
     .footer {{ margin-top: 1.25rem; font-size: 0.85rem; color: #6b7280; }}
   </style>
 </head>
 <body>
   <div class="card">
     <h1>WFO Parser</h1>
-    <p class="hint">Upload your MultiCharts WFO CSV to generate PowerLanguage code.</p>
+    <p class="hint">Upload your MultiCharts WFO CSV, or paste the CSV text, to generate PowerLanguage code.</p>
+
     <form id="form" method="post" action="/convert" enctype="multipart/form-data">
-  <div class="input-row">
-    <input type="file" name="file" accept=".csv" required />
-  </div>
-  <label><input type="checkbox" name="download" value="yes"> Also download .txt file</label><br><br>
-  <button type="submit">Convert</button>
-</form>
+
+      <div class="mode-row">
+  <label><input type="radio" name="input_mode" value="paste" checked> Paste CSV text</label>
+  <label><input type="radio" name="input_mode" value="file"> Upload CSV</label>
+</div>
+
+
+      <div id="file_block" class="input-row">
+        <input type="file" name="file" accept=".csv" />
+      </div>
+
+      <div id="paste_block" style="display:none; margin-top: 0.25rem;">
+        <textarea name="wfo_text" placeholder="Paste the WFO CSV content here (including the header row)..."></textarea>
+      </div>
+
+      <label><input type="checkbox" name="download" value="yes"> Also download .txt file</label><br><br>
+      <button type="submit">Convert</button>
+    </form>
 
     <div id="output"></div>
-    <div class="footer">Your file is processed in-memory and not stored on the server.</div>
+    <div class="footer">Your data is processed in-memory and not stored on the server.</div>
   </div>
+
   <script>
-  const form = document.getElementById('form');
-  form.addEventListener('submit', async (e) => {{
-    e.preventDefault();
-    const formData = new FormData(form);
-    const resp = await fetch('/convert', {{ method: 'POST', body: formData }});
-    const html = await resp.text();
-    document.open(); document.write(html); document.close();
-  }});
+    const form = document.getElementById('form');
+    const fileBlock = document.getElementById('file_block');
+    const pasteBlock = document.getElementById('paste_block');
+
+    function setMode(mode) {{
+      fileBlock.style.display = (mode === "file") ? "flex" : "none";
+      pasteBlock.style.display = (mode === "paste") ? "block" : "none";
+    }}
+
+    document.querySelectorAll('input[name="input_mode"]').forEach(r => {{
+      r.addEventListener("change", () => {{
+        const mode = document.querySelector('input[name="input_mode"]:checked').value;
+        setMode(mode);
+      }});
+    }});
+
+    setMode("paste");
+
+    form.addEventListener('submit', async (e) => {{
+      e.preventDefault();
+      const formData = new FormData(form);
+      const resp = await fetch('/convert', {{ method: 'POST', body: formData }});
+      const html = await resp.text();
+      document.open(); document.write(html); document.close();
+    }});
   </script>
 </body>
 </html>
@@ -215,14 +324,32 @@ input[type=file] {{
 
 
 @app.post("/convert", response_class=HTMLResponse)
-async def convert(file: UploadFile = File(...), download: str | None = Form(None)):
-    import io, uuid
+async def convert(
+    file: Optional[UploadFile] = File(None),
+    wfo_text: Optional[str] = Form(None),
+    download: Optional[str] = Form(None),
+):
+    import uuid
     from fastapi.responses import HTMLResponse
 
-    filename = file.filename or "wfo.csv"
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    file_provided = file is not None and (file.filename or "") != ""
+    text_provided = wfo_text is not None and wfo_text.strip() != ""
+
+    # Require exactly one input
+    if not file_provided and not text_provided:
+        raise HTTPException(status_code=400, detail="Please upload a CSV file or paste the WFO CSV text.")
+    if file_provided and text_provided:
+        raise HTTPException(status_code=400, detail="Please use either upload OR paste text, not both.")
+
+    if text_provided:
+        # Treat pasted content as CSV text
+        content = wfo_text.replace("\\r\\n", "\\n").replace("\\r", "\\n").encode("utf-8")
+        filename = "pasted_wfo.csv"
+    else:
+        filename = file.filename or "wfo.csv"
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     try:
         output_text = parse_wfo_csv(content)
@@ -237,7 +364,6 @@ async def convert(file: UploadFile = File(...), download: str | None = Form(None
         base = filename.rsplit(".", 1)[0]
         out_name = f"{base}_wfo.txt"
         download_html = f"<a class='btn download' href='/download/{uid}?name={out_name}'>⬇️ Download .txt File</a>"
-
 
     # Show the result in a scrollable text box
     return f"""
@@ -261,7 +387,6 @@ body {{
   padding-top: 10vh;  /* about top third */
 }}
 
-
 .container {{
   width: 100%;
   max-width: 1000px;
@@ -273,25 +398,23 @@ body {{
   text-align: center;
 }}
 
-
-
 h2 {{
   margin-top: 0;
 }}
 
 textarea {{
-  width: 95%;                  /* slightly narrower than container */
-  max-width: 950px;            /* ensures even padding visually */
+  width: 95%;
+  max-width: 950px;
   height: 350px;
   border-radius: 8px;
-  padding: 1rem 1.25rem;       /* comfortable inner spacing */
+  padding: 1rem 1.25rem;
   border: 1px solid #d1d5db;
   font-family: monospace;
   background: #f9fafb;
   box-sizing: border-box;
-  margin: 0 auto;              /* centers it perfectly */
-  display: block;              /* ensures horizontal centering works */
-  resize: vertical;            /* allows user to resize vertically */
+  margin: 0 auto;
+  display: block;
+  resize: vertical;
   line-height: 1.5;
   font-size: 0.95rem;
   white-space: pre;
@@ -301,25 +424,10 @@ textarea {{
 
 .button-row {{
   display: flex;
-  flex-direction: column;    /* stack buttons vertically */
-  align-items: center;       /* center everything horizontally */
+  flex-direction: column;
+  align-items: center;
   gap: 1rem;
   margin-top: 1.5rem;
-}}
-
-.back-link {{
-  text-align: center;   /* ensures the link is horizontally centered */
-  margin-top: 1.5rem;   /* nice spacing below buttons */
-}}
-
-.back-link a {{
-  color: #111827;
-  text-decoration: none;
-  font-size: 0.95rem;
-}}
-
-.back-link a:hover {{
-  text-decoration: underline;
 }}
 
 .btn {{
@@ -335,14 +443,14 @@ textarea {{
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
   font-size: 1rem;
   font-weight: 500;
-  min-width: 340px;     /* increased width */
+  min-width: 340px;
   max-width: 340px;
-  white-space: nowrap;  /* keeps text on one line */
+  white-space: nowrap;
   transition: background 0.2s ease, transform 0.1s ease;
 }}
 
 .btn.secondary {{
-  background: #e5e7eb; /* light gray */
+  background: #e5e7eb;
   color: #111827;
 }}
 .btn.secondary:hover {{
@@ -392,18 +500,15 @@ textarea {{
   <div class="container">
     <h2>Generated PowerLanguage Code</h2>
     <textarea id="code" readonly>{output_text}</textarea>
-<div class="button-row">
-  <button class="btn copy" onclick="copyCode()">Copy to Clipboard</button>
-  {download_html}
-  <span id="msg"></span>
-</div>
+    <div class="button-row">
+      <button class="btn copy" onclick="copyCode()">Copy to Clipboard</button>
+      {download_html}
+      <span id="msg"></span>
+    </div>
 
-<div class="button-row">
-  <a class="btn secondary" href="/">← Back to upload another file</a>
-</div>
-
-
-
+    <div class="button-row">
+      <a class="btn secondary" href="/">← Back to upload/paste another report</a>
+    </div>
   </div>
 
  <script>
@@ -413,11 +518,9 @@ async function copyCode() {{
   const text = code.value;
 
   try {{
-    // Modern Clipboard API
     await navigator.clipboard.writeText(text);
     msg.textContent = '✓ Copied!';
   }} catch (err) {{
-    // Fallback for older browsers
     code.select();
     document.execCommand('copy');
     msg.textContent = '✓ Copied (fallback)';
@@ -427,9 +530,6 @@ async function copyCode() {{
   setTimeout(() => msg.classList.remove('show'), 2000);
 }}
 </script>
-
-
-
 </body></html>
 """
 
