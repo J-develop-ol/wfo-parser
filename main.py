@@ -45,6 +45,9 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="WFO Parser", version="1.2.0")
 LAST_RESULT = {}  # token -> dict(payload)
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 # ----------------------------
 # Combined UI (one page + tabs)
