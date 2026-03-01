@@ -18,18 +18,12 @@ from __future__ import annotations
 
 import io
 import logging
-import secrets
 from datetime import datetime
 from typing import Dict, Optional
 
-import matplotlib
-matplotlib.use("Agg")
-
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
-
-from equity_tools import generate_equity_curve
 
 # ====== SECURITY: set your production domain(s) here ======
 CORS_ALLOWED_ORIGINS = [
@@ -44,373 +38,7 @@ CORS_ALLOWED_ORIGINS = [
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="WFO Parser", version="1.2.0")
-LAST_RESULT = {}  # token -> dict(payload)
 
-# ----------------------------
-# Combined UI (one page + tabs)
-# ----------------------------
-
-def html_escape(s: str) -> str:
-    return (
-        (s or "")
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
-
-def fig_to_img_html(fig) -> str:
-    import io
-    import base64
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
-    data = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"<img alt='Equity curve' style='width:100%; max-height:50vh; height:auto; object-fit:contain; border-radius:12px; border:1px solid var(--line);' src='data:image/png;base64,{data}' />"
-
-def render_combined_page(
-    csv_text: str = "",
-    active_tab: str = "eq",        # "eq" or "code"
-    status: str = "",
-    equity_html: str = "",
-    code_text: str = "",
-    
-) -> HTMLResponse:
-
-    status_block = ""
-    if status:
-        status_block = f"<div class='status'>{html_escape(status)}</div>"
-
-    # Panels (we'll hide/show with tabs)
-    equity_panel = equity_html or "<div class='status'>No equity curve output yet.</div>"
-    code_panel = f"<pre id='code-output'>{html_escape(code_text)}</pre>" if code_text else "<div class='status'>No code output yet.</div>"
-
-    html = f"""
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>WFO Tools</title>
-  <style>
-    :root {{ --bg:#f6f7fb; --card:#ffffff; --ink:#111827; --muted:#6b7280; --line:#e5e7eb; }}
-    body {{ margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:var(--ink); }}
-    .wrap {{ max-width: 1100px; margin: 0 auto; padding: 18px; }}
-    .card {{ background:var(--card); border:1px solid var(--line); border-radius:16px; padding:16px; box-shadow: 0 8px 30px rgba(0,0,0,.25); }}
-    textarea {{ width:100%; min-height: 60px; resize: vertical; padding: 12px; border-radius: 12px;
-               border:1px solid var(--line); background: #ffffff; color:var(--ink); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; box-sizing: border-box; }}
-    .row {{ display:flex; gap:10px; flex-wrap: wrap; align-items: center; margin-top: 10px; }}
-    .btn {{ border-radius: 12px; padding: 10px 14px; border: 1px solid var(--line); cursor:pointer; font-weight: 800; }}
-    .btnPrimary {{ background: #2d6bff; color: white; border-color: #2d6bff; }}
-    .btnGhost {{ background: transparent; color: var(--ink); }}
-    .hint {{ color:var(--muted); font-size: 13px; margin-top: 8px; }}
-    .status {{ margin-top: 10px; padding: 10px 12px; border-radius: 12px; border:1px solid var(--line); background:#ffffff; color: var(--muted); font-size: 13px; margin-bottom: 16px; }}
-    .tabs {{ display:flex; gap:10px; margin-top: 14px; }}
-    .tab {{ padding: 8px 12px; border-radius: 999px; border:1px solid var(--line); background:#ffffff; color:var(--muted); cursor:pointer; font-weight:800; font-size:13px; user-select:none; }}
-    .tab.active {{ background:#1a2440; color: var(--ink); border-color:#2a3a62; }}
-    .panel {{ margin-top: 12px; }}
-    pre {{ white-space: pre-wrap; word-break: break-word; padding: 12px; border-radius: 12px;
-          border:1px solid var(--line); background: #ffffff; color: var(--ink);
-          font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; margin:0; }}
-    .copyRow {{ display:flex; gap:10px; margin-top:10px; flex-wrap:wrap; margin-bottom: 16px; }}
-    .smallBtn {{ padding: 8px 12px; border-radius: 12px; border:1px solid var(--line); background:#ffffff; color: var(--ink); cursor:pointer; font-weight:800; }}
-    a {{ color:#8fb0ff; }}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
-        <div>
-          <div style="font-size:20px; font-weight:900; margin-bottom:4px;">WFO Tools</div>
-          <div style="color:var(--muted);">Paste your MultiCharts WFO CSV text, then choose an action.</div>
-        </div>
-      </div>
-
-      <form method="post" action="/run" style="margin-top:14px;">
-        {
-    f"<textarea name='csv_text' placeholder='Paste WFO CSV text here...' style='display:none;'>{html_escape(csv_text)}</textarea>"
-    if (equity_html or code_text)
-    else f"<textarea name='csv_text' placeholder='Paste WFO CSV text here...' style='min-height:110px;'>{html_escape(csv_text)}</textarea>"
-}
-        <div class="row" style="align-items:center;">
-          <label for="date_format" class="hint" style="margin:0; font-weight:800;">
-            Date format
-          </label>
-          <select name="date_format" id="date_format"
-                  style="padding:10px 12px; border-radius:12px; border:1px solid var(--line); background:#fff; font-weight:800;">
-            <option value="auto" selected>Auto-detect (recommended)</option>
-            <option value="dmy">DD/MM/YYYY (day-first)</option>
-            <option value="mdy">MM/DD/YYYY (month-first)</option>
-            <option value="ymd">YYYY/MM/DD (year-first)</option>
-          </select>
-          <span class="hint" style="margin:0;">
-            If Auto-detect struggles with 01/02/2024, choose here.
-          </span>
-        </div>
-
-        <div class="row">
-  <button class="btn btnPrimary" type="submit" name="action" value="equity">Draw equity curve</button>
-  <button class="btn btnGhost" type="submit" name="action" value="code">Generate PowerLanguage code</button>
-
-  <a href="/" style="text-decoration:none;">
-    <button class="btn btnGhost" type="button">Clear / New CSV</button>
-  </a>
-</div>
-
-        {status_block}
-      </form>
-
-<div class="panel">
-  {
-    (
-      "<div class='copyRow'><button id='copyBtn' type='button' class='smallBtn' onclick='copyCode()'>Copy code</button></div>"
-      + code_panel
-    )
-    if active_tab == "code"
-    else equity_panel
-  }
-</div>
-
-</div>
-</div>
-
-<script>
-  async function copyCode(){{
-    const el = document.getElementById('code-output');
-    if(!el) return;
-    const text = el.innerText || "";
-    await navigator.clipboard.writeText(text);
-    const b = document.getElementById('copyBtn');
-    if(b){{
-      b.textContent = "Copied ✓";
-      setTimeout(()=>b.textContent="Copy code", 1200);
-    }}
-  }}
-
-  // Remove ?t=... from URL after redirect (clean address bar)
-  if (window.location.search.includes("t=")) {{
-    window.history.replaceState({{}}, document.title, "/");
-  }}
-
-    (function () {{
-    const KEY = "wfo_date_format";
-    const select = document.getElementById("date_format");
-    if (!select) return;
-
-    // Restore last selection
-    const saved = localStorage.getItem(KEY);
-    if (saved) select.value = saved;
-
-    // Save on change
-    select.addEventListener("change", () => {{
-      localStorage.setItem(KEY, select.value);
-    }});
-
-    // Also save on submit
-    const form = select.closest("form");
-    if (form) {{
-      form.addEventListener("submit", () => {{
-        localStorage.setItem(KEY, select.value);
-      }});
-    }}
-  }})();
-
-</script>
-
-</body>
-</html>
-"""
-    return HTMLResponse(html)
-
-@app.get("/", response_class=HTMLResponse)
-def combined_home(t: Optional[str] = None):
-    if t and t in LAST_RESULT:
-        payload = LAST_RESULT[t]   # <-- IMPORTANT: no pop()
-        return render_combined_page(**payload)
-
-    return render_combined_page(
-        csv_text="",
-        active_tab="eq",
-        status="Paste WFO CSV text above, then choose an action.",
-        equity_html="",
-        code_text="",
-    )
-
-# ---- New shared CSV parser ----
-def parse_wfo_to_dataframe(csv_text: str):
-    import pandas as pd
-    import io
-
-    text = (csv_text or "").replace("\r\n", "\n").replace("\r", "\n")
-    lines = [ln for ln in text.split("\n") if ln.strip()]
-    if not lines:
-        raise ValueError("Input is empty.")
-
-    header = lines[0]
-
-    if "\t" in header:
-        delim = "\t"
-    elif ";" in header and "," not in header:
-        delim = ";"
-    else:
-        delim = ","
-
-    expected_cols = header.count(delim) + 1
-    table_lines = [header]
-
-    for ln in lines[1:]:
-        if ln.count(delim) + 1 != expected_cols:
-            break
-        table_lines.append(ln)
-
-    df = pd.read_csv(io.StringIO("\n".join(table_lines)), sep=delim)
-    df.columns = df.columns.str.strip()
-
-    if df.empty:
-        raise ValueError("No valid table rows detected.")
-
-    return df
-
-import re
-import pandas as pd
-
-_DATE_RE = re.compile(r"^\s*(\d{1,4})[./-](\d{1,2})[./-](\d{1,4})\s*$")
-
-def _normalize_date_token(s: str) -> str:
-    """Trim, remove obvious junk, and normalize separators to '/'."""
-    s = (s or "").strip().strip('"').strip("'").strip()
-    # remove trailing commas/semicolons etc.
-    s = re.sub(r"[,\;\)\]]+$", "", s)
-    # normalize separators
-    s = s.replace(".", "/").replace("-", "/")
-    return s
-
-def _infer_date_order(tokens: list[str]) -> str:
-    """
-    Infer 'dmy', 'mdy', or 'ymd' from many date tokens.
-    Returns 'dmy' by default if ambiguous.
-    """
-    a_vals, b_vals, c_vals = [], [], []
-
-    for t in tokens:
-        t = _normalize_date_token(t)
-        m = _DATE_RE.match(t)
-        if not m:
-            continue
-        a, b, c = m.groups()
-        try:
-            a_i, b_i, c_i = int(a), int(b), int(c)
-        except ValueError:
-            continue
-        a_vals.append(a_i); b_vals.append(b_i); c_vals.append(c_i)
-
-    if not a_vals:
-        return "dmy"  # fallback
-
-    # Year-first: first component looks like a year a lot
-    # (simple heuristic: 4 digits and >= 1900)
-    year_first_hits = sum(1 for x in a_vals if x >= 1900)
-    if year_first_hits >= max(1, len(a_vals) // 2):
-        return "ymd"
-
-    # Disambiguate dmy vs mdy using >12 evidence
-    if any(x > 12 for x in a_vals):
-        return "dmy"
-    if any(x > 12 for x in b_vals):
-        return "mdy"
-
-    # Fully ambiguous (all <=12) → default dmy
-    return "dmy"
-
-def parse_date_series(series: pd.Series, date_format: str = "auto") -> tuple[pd.Series, str]:
-    """
-    Parse a pandas Series of date strings into datetime64[ns].
-    Returns (parsed_series, resolved_format).
-    """
-    raw = series.astype(str).map(lambda x: x.split()[0])  # keep first token if time ever appears
-    norm = raw.map(_normalize_date_token)
-
-    resolved = date_format
-    if date_format == "auto":
-        resolved = _infer_date_order(norm.tolist())
-
-    if resolved == "ymd":
-        parsed = pd.to_datetime(norm, format="%Y/%m/%d", errors="raise")
-    elif resolved == "mdy":
-        parsed = pd.to_datetime(norm, format="%m/%d/%Y", errors="raise")
-    else:  # "dmy"
-        parsed = pd.to_datetime(norm, format="%d/%m/%Y", errors="raise")
-
-    return parsed, resolved
-
-# ---- IMPORTANT: plug your existing logic into these two functions ----
-
-def tool1_make_equity_html_from_csv(csv_text: str, date_format: str = "auto") -> str:
-    df = parse_wfo_to_dataframe(csv_text)
-
-    fig, date_fmt = generate_equity_curve(df, date_format=date_format)
-    img_html = fig_to_img_html(fig)
-
-    label = "Auto-detected date format" if date_format == "auto" else "Using selected date format"
-    return f"<div class='status'>{label}: {date_fmt}</div>{img_html}"
-
-
-def tool2_make_code_from_csv(csv_text: str, date_format: str = "auto") -> str:
-    return parse_wfo_csv_text(csv_text, date_format=date_format)
-
-
-@app.post("/run")
-def run(
-    csv_text: str = Form(""),
-    action: str = Form("equity"),
-    date_format: str = Form("auto"),
-):
-
-    try:
-        # Decide what to run based on button
-        equity_html = ""
-        code_text = ""
-
-        if action == "equity":
-            equity_html = tool1_make_equity_html_from_csv(csv_text, date_format)
-            active_tab = "eq"
-            status = "Equity curve generated."
-        elif action == "code":
-            code_text = tool2_make_code_from_csv(csv_text, date_format)
-            active_tab = "code"
-            status = f"PowerLanguage code generated. Date format: {date_format}"
-        else:
-            active_tab = "eq"
-            status = "Unknown action."
-
-        payload = dict(
-            csv_text=csv_text,
-            active_tab=active_tab,
-            status=status,
-            equity_html=equity_html,
-            code_text=code_text,
-        )
-
-        token = secrets.token_urlsafe(16)
-        LAST_RESULT[token] = payload
-
-        return RedirectResponse(url=f"/?t={token}", status_code=303)
-
-    except Exception as e:
-
-        payload = dict(
-            csv_text=csv_text,
-            active_tab="eq",
-            status=f"Error: {str(e)}",
-            equity_html="",
-            code_text="",
-        )
-
-        token = secrets.token_urlsafe(16)
-        LAST_RESULT[token] = payload
-
-        return RedirectResponse(url=f"/?t={token}", status_code=303)
 # Step 2 – root route (change path to /health so it doesn't override your main page)
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health():
@@ -428,12 +56,39 @@ app.add_middleware(
 
 # ---------- Utility: your parsing logic ----------
 
-def parse_wfo_csv_text(csv_text: str, date_format: str = "auto") -> str:
+def parse_wfo_csv(csv_bytes: bytes, encoding: str = "utf-8") -> str:
     import pandas as pd
-    from date_tools import parse_date_series
+    import io
     from collections import defaultdict
 
-    df = parse_wfo_to_dataframe(csv_text)
+    text = csv_bytes.decode(encoding, errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+
+    if not lines:
+        raise HTTPException(status_code=400, detail="Input is empty.")
+
+    # Detect delimiter from header line
+    header = lines[0]
+    if "\t" in header:
+        delim = "\t"
+    elif ";" in header and "," not in header:
+        delim = ";"
+    else:
+        delim = ","
+
+    # Keep only the rectangular table portion (ignore footer like "Number of profitable runs")
+    expected_cols = header.count(delim) + 1
+    table_lines = [header]
+
+    for ln in lines[1:]:
+        # Only accept rows that match the header column count
+        if ln.count(delim) + 1 != expected_cols:
+            break
+        table_lines.append(ln)
+
+    table_text = "\n".join(table_lines)
+    df = pd.read_csv(io.StringIO(table_text), sep=delim)
+    df.columns = df.columns.str.strip()
 
     if df.empty:
         raise HTTPException(status_code=400, detail="No data rows found in the pasted table.")
@@ -449,21 +104,6 @@ def parse_wfo_csv_text(csv_text: str, date_format: str = "auto") -> str:
                 "Make sure you copied the main WFO table including the Out-of-Sample interval columns."
             ),
         )
-
-    # Auto-detect using BOTH start and end columns
-    if date_format == "auto":
-        combined = pd.concat([df[start_col], df[end_col]], ignore_index=True)
-        _, resolved = parse_date_series(combined, date_format="auto")
-    else:
-        resolved = date_format
-
-    start_parsed, _ = parse_date_series(df[start_col], date_format=resolved)
-    end_parsed, _ = parse_date_series(df[end_col], date_format=resolved)
-
-    df = df.copy()
-    df["_start_dt"] = start_parsed
-    df["_end_dt"] = end_parsed
-    df = df.dropna(subset=["_start_dt", "_end_dt"])
 
     def to_pl_date(date_str: str) -> str:
         date_only = str(date_str).split()[0]
@@ -523,8 +163,8 @@ def parse_wfo_csv_text(csv_text: str, date_format: str = "auto") -> str:
     prev_end_dt = None
 
     for _, row in df.iterrows():
-        start_dt = row["_start_dt"]
-        end_dt = row["_end_dt"]
+        start_dt = pd.to_datetime(str(row[start_col]).split()[0], dayfirst=True, errors="raise")
+        end_dt = pd.to_datetime(str(row[end_col]).split()[0], dayfirst=True, errors="raise")
 
         if prev_end_dt is not None and start_dt <= prev_end_dt:
             start_dt = prev_end_dt + pd.Timedelta(days=1)
@@ -649,22 +289,6 @@ async def index() -> str:
       <div id="file_block" class="input-row" style="display:none;">
   <input type="file" name="file" accept=".csv" />
 </div>
-
-      <div id="date_format_row" style="margin-top: 0.75rem;">
-        <label for="date_format" class="hint" style="display:block; margin-bottom: 0.25rem;">
-          Date format
-        </label>
-        <select name="date_format" id="date_format"
-                style="padding: 0.5rem; border-radius: 8px; border: 1px solid #d1d5db; background: #fff;">
-          <option value="auto" selected>Auto-detect (recommended)</option>
-          <option value="dmy">DD/MM/YYYY (day-first)</option>
-          <option value="mdy">MM/DD/YYYY (month-first)</option>
-          <option value="ymd">YYYY/MM/DD (year-first)</option>
-        </select>
-        <div class="hint" style="margin-top: 0.35rem;">
-          If Auto-detect gets confused by dates like 01/02/2024, choose the correct format here.
-        </div>
-      </div>
 
       <div id="paste_block" style="display:none; margin-top: 0.25rem;">
         <textarea name="wfo_text" placeholder="Paste the WFO CSV content here (including the header row)..."></textarea>
