@@ -444,19 +444,29 @@ def parse_wfo_csv_text(csv_text: str, date_format: str = "auto") -> str:
     start_col = "Begin Out-of-Sample Data Interval"
     end_col = "End Out-of-Sample Data Interval"
 
-    if start_col not in df.columns or end_col not in df.columns:
+    date_cols = [
+    "Begin In-Sample Data Interval",
+    "End In-Sample Data Interval",
+    "Begin Out-of-Sample Data Interval",
+    "End Out-of-Sample Data Interval",
+    ]
+
+    missing_cols = [c for c in date_cols if c not in df.columns]
+
+    if missing_cols:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Could not find required date columns. "
-                "Make sure you copied the main WFO table including the Out-of-Sample interval columns."
+                f"Could not find required date columns: {missing_cols}. "
+                "Make sure you copied the main WFO table including the interval columns."
             ),
         )
 
-    # Auto-detect using BOTH start and end columns
+    combined_dates = pd.concat([df[c] for c in date_cols], ignore_index=True)
+
+    # Auto-detect using ALL 4 date columns
     if date_format == "auto":
-        combined = pd.concat([df[start_col], df[end_col]], ignore_index=True)
-        _, resolved = parse_date_series(combined, date_format="auto")
+        _, resolved = parse_date_series(combined_dates, date_format="auto")
     else:
         resolved = date_format
 

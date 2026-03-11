@@ -5,14 +5,10 @@ _DATE_RE = re.compile(r"^\s*(\d{1,4})[./-](\d{1,2})[./-](\d{1,4})\s*$")
 
 def _normalize_date_token(s: str) -> str:
     s = (s or "").strip().strip('"').strip("'").strip()
-    # remove spaces around separators, e.g. "30. 04. 2017" -> "30.04.2017"
-    s = re.sub(r"\s*([./-])\s*", r"\1", s)
-    # then remove any remaining spaces
-    s = re.sub(r"\s+", "", s)
+    # keep only first whitespace-separated token (drops "18:30:00")
+    s = s.split()[0] if s else ""
     # remove trailing commas/semicolons etc.
     s = re.sub(r"[,\;\)\]]+$", "", s)
-    # keep only the leading date part, e.g. "05.04.2017 16:50:00" -> "05.04.2017"
-    s = re.sub(r"^(\d{1,4}[./-]\d{1,2}[./-]\d{1,4}).*$", r"\1", s)
     # normalize separators
     s = s.replace(".", "/").replace("-", "/")
     return s
@@ -49,7 +45,7 @@ def _infer_date_order(tokens: list[str]) -> str:
     return "dmy"
 
 def parse_date_series(series: pd.Series, date_format: str = "auto") -> tuple[pd.Series, str]:
-    raw = series.astype(str)
+    raw = series.astype(str).map(lambda x: x.split()[0])
     norm = raw.map(_normalize_date_token)
 
     resolved = date_format
